@@ -8,6 +8,7 @@ import logging
 import multiprocessing
 import os
 import queue
+import signal
 import sys
 import time
 from collections.abc import Iterable
@@ -356,12 +357,36 @@ class StageGroup:
             self._startup_error_channels.clear()
 
 
+def _install_parent_death_signal() -> None:
+    if sys.platform != "linux":
+        return
+    try:
+        import ctypes
+
+        parent_pid = os.getppid()
+        PR_SET_PDEATHSIG = 1
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+            logger.warning(
+                "prctl(PR_SET_PDEATHSIG) failed (errno=%d); an orphaned stage "
+                "worker may survive a parent SIGKILL and hold GPU memory",
+                ctypes.get_errno(),
+            )
+            return
+
+        if os.getppid() != parent_pid:
+            os._exit(1)
+    except Exception as exc:
+        logger.warning("Could not install parent-death signal: %s", exc)
+
+
 def stage_process_main(
     spec: StageWorkerProcessSpec,
     ready_event: multiprocessing.Event,
     startup_error_channel: Any | None = None,
 ) -> None:
     """Subprocess entrypoint: construct stage(s) from *spec* and run them."""
+    _install_parent_death_signal()
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     if not spec.stage_specs:
         raise ValueError(f"Process {spec.process_name!r} requires at least one stage")
