@@ -241,13 +241,14 @@ class StageGroup:
 
     def spawn(self, ctx: multiprocessing.context.SpawnContext) -> None:
         """Spawn the OS process(es) owned by this group."""
+        expected_parent_pid = os.getpid()
         for spec in self.process_specs:
             event = ctx.Event()
             startup_error_channel = ctx.Queue()
             proc_name = _process_name(spec)
             proc = ctx.Process(
                 target=stage_process_main,
-                args=(spec, event, startup_error_channel),
+                args=(spec, event, expected_parent_pid, startup_error_channel),
                 name=proc_name,
                 daemon=True,
             )
@@ -357,13 +358,14 @@ class StageGroup:
             self._startup_error_channels.clear()
 
 
-def _install_parent_death_signal() -> None:
+def _install_parent_death_signal(expected_parent_pid: int) -> None:
     if sys.platform != "linux":
         return
     try:
         import ctypes
 
-        parent_pid = os.getppid()
+        if os.getppid() != expected_parent_pid:
+            os._exit(1)
         PR_SET_PDEATHSIG = 1
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
@@ -374,7 +376,7 @@ def _install_parent_death_signal() -> None:
             )
             return
 
-        if os.getppid() != parent_pid:
+        if os.getppid() != expected_parent_pid:
             os._exit(1)
     except Exception as exc:
         logger.warning("Could not install parent-death signal: %s", exc)
@@ -383,10 +385,11 @@ def _install_parent_death_signal() -> None:
 def stage_process_main(
     spec: StageWorkerProcessSpec,
     ready_event: multiprocessing.Event,
+    expected_parent_pid: int,
     startup_error_channel: Any | None = None,
 ) -> None:
     """Subprocess entrypoint: construct stage(s) from *spec* and run them."""
-    _install_parent_death_signal()
+    _install_parent_death_signal(expected_parent_pid)
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     if not spec.stage_specs:
         raise ValueError(f"Process {spec.process_name!r} requires at least one stage")
