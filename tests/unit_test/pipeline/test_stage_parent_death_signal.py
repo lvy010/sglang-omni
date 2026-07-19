@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import os
 import signal
 
 import pytest
@@ -23,7 +24,7 @@ class _FakeLibc:
 def test_parent_death_signal_is_noop_off_linux(monkeypatch) -> None:
     monkeypatch.setattr(stage_workers.sys, "platform", "darwin")
 
-    def _fail(*_a, **_k):  # pragma: no cover - must never run off Linux
+    def _fail(*_a, **_k):  # pragma: no cover
         raise AssertionError("ctypes must not be touched off Linux")
 
     import ctypes
@@ -44,19 +45,16 @@ def test_parent_death_signal_requests_sigkill_on_parent_exit(monkeypatch) -> Non
 
     assert fake.calls, "prctl was not called"
     option, sig = fake.calls[0][0], fake.calls[0][1]
-    assert option == 1  # PR_SET_PDEATHSIG
+    assert option == 1
     assert sig == signal.SIGKILL
 
 
 def test_parent_death_signal_exits_when_parent_died_before_install(monkeypatch) -> None:
-    """Parent died during the spawn bootstrap: getppid no longer matches the
-    launcher PID, so exit before touching prctl."""
     fake = _FakeLibc()
     import ctypes
 
     monkeypatch.setattr(stage_workers.sys, "platform", "linux")
     monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: fake)
-    # Already reparented away from the expected launcher PID.
     monkeypatch.setattr(stage_workers.os, "getppid", lambda: 1)
 
     exit_codes: list[int] = []
@@ -75,14 +73,11 @@ def test_parent_death_signal_exits_when_parent_died_before_install(monkeypatch) 
 
 
 def test_parent_death_signal_exits_when_parent_died_during_install(monkeypatch) -> None:
-    """Parent alive at entry but dies while prctl is being installed: the second
-    getppid check catches the reparent and exits."""
     fake = _FakeLibc()
     import ctypes
 
     monkeypatch.setattr(stage_workers.sys, "platform", "linux")
     monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: fake)
-    # First check matches the launcher; second check sees the reparent to init.
     ppids = iter([EXPECTED_PARENT, 1])
     monkeypatch.setattr(stage_workers.os, "getppid", lambda: next(ppids))
 
@@ -110,5 +105,71 @@ def test_parent_death_signal_survives_prctl_failure(monkeypatch) -> None:
     monkeypatch.setattr(ctypes, "get_errno", lambda: 1)
     monkeypatch.setattr(stage_workers.os, "getppid", lambda: EXPECTED_PARENT)
 
-    # A failing prctl must be swallowed (logged), not raised.
     stage_workers._install_parent_death_signal(EXPECTED_PARENT)
+
+
+def test_spawn_threads_expected_parent_pid_into_install(monkeypatch) -> None:
+    from sglang_omni.pipeline.stage_workers import (
+        StageGroup,
+        StageLaunchConfig,
+        StageWorkerProcessSpec,
+    )
+
+    installed_with: list[int] = []
+    monkeypatch.setattr(
+        stage_workers,
+        "_install_parent_death_signal",
+        lambda pid: installed_with.append(pid),
+    )
+    monkeypatch.setattr(stage_workers, "_prepare_cuda_environment", lambda *a, **k: None)
+    monkeypatch.setattr(stage_workers, "apply_gpu_compat_env_defaults", lambda *a, **k: None)
+    monkeypatch.setattr(stage_workers, "_run_process", lambda *a, **k: None)
+
+    captured: dict = {}
+
+    class _FakeEvent:
+        def set(self) -> None: ...
+
+        def is_set(self) -> bool:
+            return True
+
+    class _FakeQueue:
+        def put(self, *a) -> None: ...
+
+        def close(self) -> None: ...
+
+        def join_thread(self) -> None: ...
+
+    class _FakeProcess:
+        def __init__(self, target, args, **_) -> None:
+            self.target, self.args = target, args
+            self.pid = 1234
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+    class _FakeCtx:
+        def Event(self) -> _FakeEvent:
+            return _FakeEvent()
+
+        def Queue(self) -> _FakeQueue:
+            return _FakeQueue()
+
+        def Process(self, target, args, name=None, daemon=None) -> _FakeProcess:
+            captured["target"], captured["args"] = target, args
+            return _FakeProcess(target, args)
+
+    group = StageGroup(
+        "g",
+        [
+            StageWorkerProcessSpec(
+                process_name="p",
+                stage_specs=[StageLaunchConfig(stage_name="s")],
+            )
+        ],
+    )
+    group.spawn(_FakeCtx())
+
+    assert captured["target"] is stage_workers.stage_process_main
+    assert captured["args"][2] == os.getpid()
+    assert installed_with == [os.getpid()]
