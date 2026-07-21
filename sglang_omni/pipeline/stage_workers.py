@@ -373,8 +373,9 @@ def _install_parent_death_signal(expected_parent_pid: int) -> None:
         if os.getppid() != expected_parent_pid:
             os._exit(1)
         PR_SET_PDEATHSIG = 1
+        sigkill = getattr(signal, "SIGKILL", 9)
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+        if libc.prctl(PR_SET_PDEATHSIG, sigkill, 0, 0, 0) != 0:
             logger.warning(
                 "prctl(PR_SET_PDEATHSIG) failed (errno=%d); an orphaned stage "
                 "worker may survive a parent SIGKILL and hold GPU memory",

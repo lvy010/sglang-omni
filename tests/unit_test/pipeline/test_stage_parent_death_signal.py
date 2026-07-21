@@ -46,7 +46,7 @@ def test_parent_death_signal_requests_sigkill_on_parent_exit(monkeypatch) -> Non
     assert fake.calls, "prctl was not called"
     option, sig = fake.calls[0][0], fake.calls[0][1]
     assert option == 1
-    assert sig == signal.SIGKILL
+    assert sig == getattr(signal, "SIGKILL", 9)
 
 
 def test_parent_death_signal_exits_when_parent_died_before_install(monkeypatch) -> None:
